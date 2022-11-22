@@ -1,0 +1,693 @@
+---
+title: "Indian Liver Study - CYO"
+author: "Rei Romero"
+date: "10/7/2022"
+output:
+  word_document: default
+  html_document: default
+---
+# Executive Summary
+
+Liver health is important to maintaining a good quality of life as there can be many detrimental effects that can be borne from poor liver health such as fatigue, nausea, vomiting, and jaundice (eyes and skin appearing yellow). 
+
+Thus, it would be useful to construct a model or multiple models even that would accurately predict the onset of liver disease in a patient. That is the objective of this study. 
+
+We will be using a data set collected from test samples in North East of Andhra Pradesh, India wherein there is a total of 583 observations, 416 of which suffer from some sort of liver disease, while 142 of which do not. 
+
+The following is the data set to be used:
+
+```{r}
+data <- read.csv("./indian_liver_patient.csv")
+
+str(data)
+```
+The data set contains 441 male patients and 142 female patients. The variables include basic demographic data such as age and gender, while the rest of the variables are those that relate to liver health in that they are compounds, enzymes, or other such biological phenomena that are indicators of liver health. Note that the variable to be predicted is the "Dataset" variable where a "1" denotes the presence of liver disease in a patient and a "2" indicates the lack of liver disease in a patient.
+
+## Key steps
+
+An overview for the steps that were taken is as follows:
+
+1. Data cleaning (observations with NAs were removed).
+
+2. A 70-30 training-test split was used on the data.
+
+3. Data exploration and visualization were employed comparing the group which had liver disease
+and the group which did not have liver disease.
+
+4. Logistic regression was employed on the training data, and the best logistic regression model
+was chosen through backward elimination and by removing models which did not satisfy the 
+assumptions of logistic regression. 
+
+5. Predictions for liver disease for the testing data were computed using the logistic regression model found in step 4, and the corresponding confusion matrix was computed (using the the default threshold of labeling an observation to have liver disease if the probability of said observation was greater than 0.5).
+
+6. The logistic regression model found in step 4 was designated as the final logistic regression model and its threshold for labeling an observation as having liver disease was tweaked to maximize sensitivity, while keeping the model's informedness score above 0.
+
+7. The ROC Curve for the final logistic regression model was constructed.
+
+8. XGBoost was applied to the training data using various sets of hyperparameters and the best performing 
+XGBoost model in terms of accuracy was chosen to be the final XGBoost model.
+
+9. The testing data's Dataset values were predicted using the final XGBoost model and its corresponding confusion matrix and ROC curve were constructed.
+
+10. We compare the performance of the final logistic regression model and the final XGBoost model using their respective confusion matrix and ROC curve.
+
+# Analysis
+
+We will now be going step-by-step through the process that was undertaken for this study.
+
+We first start with loading all the necessary packages:
+
+```{r echo = T, message = FALSE, warning = FALSE}
+
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+if(!require(caTools)) install.packages("caTools", repos = "http://cran.us.r-project.org")
+if(!require(ROCR)) install.packages("ROCR", repos = "http://cran.us.r-project.org")
+if(!require(pscl)) install.packages("pscl", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(car)) install.packages("car", repos = "http://cran.us.r-project.org")
+if(!require(broom)) install.packages("broom", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(boot)) install.packages("boot", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+
+library(dplyr)
+library(caTools)
+library(ROCR)
+library(pscl)
+library(caret)
+library(car)
+library(broom)
+library(tidyverse)
+library(boot)
+library(ggplot2)
+```
+
+We then proceed with data cleaning and splitting the data into a training set and a testing set. Note that we choose a 70-30 train-test split since there are only a few hundred observations and we want to keep the proportion of the test set quite high since overfitting could easily happen with this relatively small data set, while also giving the logistic regression models and XGBoost models enough data to be trained on. The following is the code for data cleaning and splitting the data:
+
+## Data cleaning and splitting
+
+```{r}
+
+sum(is.na(data))
+
+# Removing NAs since there are only four observations with NAs, at most
+data <- na.omit(data)
+
+# Turn 2's in data$Dataset into "0" which means the patient does not have
+# liver disease
+data$Dataset[data$Dataset == 2] <- 0
+
+# Turn outcome variables into factor variables
+data$Dataset <- as.factor(data$Dataset)
+
+# Splitting data into training set and testing set
+set.seed(1)
+
+# We use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(data), replace=TRUE, prob=c(0.7,0.3))
+train  <- data[sample, ]
+test   <- data[!sample, ]
+
+str(train)
+
+```
+## Data exploration and visualization
+
+Next, we proceed to the data exploration and visualization of the training data:
+
+```{r, echo = FALSE, fig.align = 'center'}
+data_vis <- train %>% group_by(Dataset)
+
+# We then start with making 100% stacked barplots for the proportions
+# of sexes for each group (1 = group with liver disease, 0 = group with
+# no liver disease)
+data_vis %>%
+  count(Gender) %>%
+  ggplot(aes(x = Dataset ,y = n, fill = Gender)) +
+    geom_bar(position = "fill", stat = "identity") +
+    ylab("Proportion") +
+    xlab("Group") +
+    ggtitle("100% stacked barplots for the proportions
+         of sexes for each group") +
+    theme(plot.title = element_text(hjust = 0.5)
+          )
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Boxplots of variables
+# Total Bilirubin
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Total_Bilirubin), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Total Bilirubin") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Direct Bilirubin
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Direct_Bilirubin), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Direct Bilirubin") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Alkaline Phosphotase
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Alkaline_Phosphotase), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Alkaline Phosphotase") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Alamine Aminotransferase
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Alamine_Aminotransferase), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Alamine Aminotransferase") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Aspartate Aminotransferase
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Aspartate_Aminotransferase), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Aspartate Aminotransferase") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Total Protiens
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Total_Protiens), color = Dataset)) +
+    geom_boxplot()+
+    ggtitle("Total Proteins") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Albumin
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Albumin), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Albumin") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+```
+
+```{r, echo = FALSE, fig.align = 'center'}
+# Albumin and Globulin Ratio
+data_vis %>%
+  ggplot(aes(x = Dataset, y = log(Albumin_and_Globulin_Ratio), color = Dataset)) +
+    geom_boxplot() +
+    ggtitle("Albumin and Globulin Ratio") + 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Group")
+
+```
+
+We show these visualizations to have a rough idea about which variables could possibly be the best indicators when it comes to predicting whether a patient has a liver disease or not. Note that the plots for the total biliribun until albumin and globulin ratio are in logarithms for the sake of easier comparison.
+
+It is clear from the graphs that gender, total proteins, and albumin are probably not very effective predictors for liver disease based on this data set. However, we need to dive deeper with more robust analyses. 
+
+## Logistic regression model building
+
+Thus, we move on to logistic regression. First, we fit a logistic regression model where the dependent variable is the Dataset variable and the independent variables are all the other variables:
+
+```{r, warning = FALSE}
+
+log_model1 <- glm(Dataset ~ ., data = train, family = 'binomial')
+
+summary(log_model1)
+```
+
+However, the variable albumin is clearly related and multicollinear with the variable albumin and globulin ratio. Therefore, we must take out albumin or the albumin and globulin ratio. We take out the albumin and globulin ratio since the information about globulin in the ratio might still be multicollinear with the other variables.
+
+```{r, warning = FALSE}
+
+log_model2 <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio, 
+                  data = train,
+                  family = 'binomial'
+                  )
+
+
+summary(log_model2)
+```
+
+### Outlier detection and removal
+
+Then we check for influential values/outliers that could affect the logistic regression. The rationale behind this step is that influential values/outliers can be detrimental to logistic regression models by making it harder for them to figure out the best fitting thresholds that would lead to the accurate classification of observations according to their independent variables.
+
+```{r}
+
+plot(log_model2, which = 4, id.n = 3)
+
+model.train <- augment(log_model2) %>% 
+  mutate(index = 1:n())
+
+# We filter for observations with standard residuals greater than 3
+model.train %>% 
+  filter(abs(.std.resid) > 3)
+
+```
+
+Thus, we remove these observations:
+
+```{r}
+
+new_train <- log_model2 %>% augment() %>% filter(abs(.std.resid) <= 3)
+new_train <- new_train[, 2:12]
+
+str(new_train)
+
+```
+
+As can be seen, the two outliers were removed since the original training data had 408 rows while the new training data now has 406 rows. We will check that the two rows that were removed were truly the outliers later on. 
+
+### Using training data with no outliers
+
+Now, we continue on to logistic regression with albumin and globulin ratio removed but, presumably, with no outliers:
+
+```{r, warning = FALSE}
+
+log_model2b <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio, 
+                   data = new_train,
+                   family = 'binomial'
+                   )
+
+summary(log_model2b)
+
+```
+
+We check for outliers again and find that there are none now.
+
+```{r}
+
+log_model2b %>% augment() %>% filter(abs(.std.resid) > 3)
+
+```
+
+### Backward elimination
+
+Moving on, we start backward elimination and take out the variable Gender as it is currently the most insignificant variable since it has the highest p-value (using alpha = 0.05). We use the usual alpha of 0.05 since the focus of this study is not strict hypothesis testing and figuring out which variables are statistically significant with respect to affecting liver disease onset. The focus instead is providing a model or models that would accurately predict the onset of liver disease.
+
+The following is the code to execute the backward elimination of the logistic regression models until the final logistic regression model where all variables are statistically significant, using p-values, with an alpha of 0.05.
+
+We first remove the Gender variable:
+
+```{r, warning = FALSE}
+
+log_model2c <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio -Gender,
+                   data = new_train, 
+                   family = 'binomial'
+                   )
+
+summary(log_model2c)
+```
+
+We take out the variable Total Bilirubin next:
+
+```{r, warning = FALSE}
+
+log_model2d <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio -Gender -Total_Bilirubin,
+                   data = new_train,
+                   family = 'binomial'
+                   )
+
+summary(log_model2d)
+
+```
+
+
+We take out the variable Aspartate Aminotransferase next:
+
+```{r, warning = FALSE}
+
+log_model2e <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio -Total_Bilirubin -Gender -
+                     Aspartate_Aminotransferase,
+                   data = new_train,
+                   family = 'binomial'
+                   )
+
+summary(log_model2e)
+```
+
+We take out the variable Total Protiens next:
+
+```{r, warning = FALSE}
+
+log_model2f <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio -Total_Bilirubin -Gender -
+                     Aspartate_Aminotransferase -Total_Protiens,
+                   data = new_train,
+                   family = 'binomial'
+                   )
+
+summary(log_model2f)
+```
+
+
+Finally, we take out the variable Albumin and construct the final logistic regression model:
+
+### Final logistic regression model
+
+```{r, warning = FALSE}
+
+log_model2g <- glm(Dataset ~ .-Albumin_and_Globulin_Ratio -Total_Bilirubin -Gender -
+                     Aspartate_Aminotransferase -Total_Protiens -Albumin,
+                   data = new_train,
+                   family = 'binomial'
+                   )
+
+summary(log_model2g)
+
+```
+
+Observe that the final logistic regression model has the lowest AIC value, and all of its variables are statistically significant which make it the most preferred model out of all the presented logistic regression models.
+
+### Model Evaluation
+
+Now that the logistic regression model has been finalized, we evaluate it based on its pseudo r-squared value (McFadden's score), check the importance of each variable, and check for multicollinearity between variables. 
+
+The last two relate more to satisfying the assumptions of logistic regression while checking the pseudo r-squared value of the model will give us an idea of how much the model is able to explain whether a patient has liver disease or not. 
+
+```{r}
+# McFadden's of the final model
+pR2(log_model2g)["McFadden"]
+
+# Variable importance
+varImp(log_model2g)
+
+# Variance inflation factors
+vif(log_model2g)
+```
+
+Note that none of the VIF values are above 5 (which would indicate multicollinearity), and that the McFadden score for the final logistic regression model is 0.2248602.
+
+### Test data set prediction
+
+Then, we predict the presence of liver disease for the patients in the test data set (using the usual probability threshold of 0.5) and also construct its coresponding confusion matrix:
+
+```{r, message = FALSE}
+
+# Predict test data based on final logistic regression model 
+predict_reg <- predict(log_model2g, 
+                       test, 
+                       type = "link"
+                       )
+
+# Changing probabilities
+predict_reg <- ifelse(predict_reg > 0.5, 1, 0)
+
+# Constructing a confusion matrix and making predict_reg into factors
+predict_reg <- as.factor(predict_reg)
+
+logreg_conmatrix <- confusionMatrix(data = predict_reg,
+                                    reference = test$Dataset,
+                                    positive = "1"
+                                    )
+
+# Logistic regression confusion matrix
+logreg_conmatrix
+
+```
+
+Now, we can see that the final logistic regression model, with the default threshold, has an accuracy of 0.6374 which is actually lower than the no information rate (NIR) of 0.7018 which is just the proportion of those who have liver disease in the testing data set. The NIR is also a measure of how often one would be correct if they just blindly assumed that any patient they come across has liver disease. As can be seen, this logistic regression model does not do so well since its accuracy is lower than its NIR.
+
+Thus, to remedy this, we will tweak the probability threshold for classification of this final logistic regression model. To do this, we will define a function that will take a threshold level as input and have the corresponding confusion matrix as its output:
+
+```{r, message = FALSE}
+# Defining a function that takes threshold level as input and have the corresponding confusion matrix as its output
+conf_matrix <- function(threshold){
+  predict_reg <- as.numeric(predict_reg)
+  predict_reg <- predict(log_model2g, 
+                         test, 
+                         type = "link")
+  predict_reg <- ifelse(predict_reg > threshold, 1, 0)
+  predict_reg <- as.factor(predict_reg)
+  logreg_conmatrix <- confusionMatrix(data = predict_reg,
+                                    reference = test$Dataset,
+                                    positive = "1")
+  print(logreg_conmatrix)
+}
+```
+
+Then we use this function for multiple values of the probability threshold.
+
+```{r}
+sapply(c(0.5, 0.005, 0.0005, 0.00005), conf_matrix)
+
+```
+
+As can be seen from the confusion matrices, the accuracy and sensitivity stop improving after a threshold of 0.0005. Thus, we choose a threshold of 0.0005 for our final logistic regression model. We focus on accuracy and sensitivity since it is desirable to maximize them in this case. It is obvious why we would want to maximize accuracy, but the reason why we want to also maximize sensitivity is because it is defined as the probability of a positive test conditioned on truly being positive.
+
+We obviously want to maximize this probability because it is of the utmost importance to detect the presence of a patient's liver disease to mitigate the harm caused by said disease, even if doing so would mean an increase in the number of false positives (as evidenced by the confusion matrices).
+
+With this final logistic regression model with a threshold of 0.0005 and a sensitivity of 0.85, we have an 85% probability of classifying a patient as having liver disease, given that they truly have a liver disease. This logistic regression model also has an accuracy of 0.7076.
+
+However, and as expected, the specificity or the probability of achieving a negative test given that a patient is truly negative is quite low, which means that false positives will happen quite often. But producing a false positive is preferable to obtaining a false negative since producing a false negative would mean a patient would not receive any treatment for their liver disease. 
+
+We now specify the final logistic regression model to have a threshold of 0.0005:
+
+```{r}
+predict_reg <- predict(log_model2g, 
+                       test, 
+                       type = "link"
+                       )
+
+predict_reg <- ifelse(predict_reg > 0.0005, 1, 0)
+
+predict_reg <- as.factor(predict_reg)
+
+logreg_conmatrix <- confusionMatrix(data = predict_reg,
+                                    reference = test$Dataset,
+                                    positive = "1"
+                                    )
+
+```
+### ROC Curve
+
+Finally, we will plot an ROC curve along with its area under the curve to show the overview and overall performance of the final logistic regression model.
+
+```{r}
+# ROC-AUC Curve
+ROCPred <- prediction(predict(log_model2g, test), test$Dataset) 
+ROCPer <- performance(ROCPred, measure = "tpr", 
+                      x.measure = "fpr"
+                      )
+
+auc <- performance(ROCPred, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+# Plotting curve
+par(mfrow = c(1, 1))
+
+plot(ROCPer, colorize = TRUE, 
+     print.cutoffs.at = seq(0.1, by = 0.1), 
+     main = "ROC Curve for logistic regression")
+abline(a = 0, b = 1)
+
+auc <- round(auc, 4)
+legend(.6, .4, auc, title = "AUC", cex = 1)
+```
+Thus, the AUC of the final logistic regression model is 0.7152.
+
+
+## XGBoost models
+
+To compare and contrast with the logistic regression model, we will be applying XGBoost models with the same data used by the logistic regression models.
+
+### Model building
+
+```{r message=FALSE, warning=FALSE}
+
+xgb_train <- as.data.frame(new_train)
+
+# We change the gender character strings into 1 for Female, 0 
+# for male, and make both of them into numeric variables
+
+xgb_train$Gender[xgb_train$Gender == "Female"] <- 1
+xgb_train$Gender[xgb_train$Gender == "Male"] <- 0
+xgb_train$Gender <- as.numeric(xgb_train$Gender)
+
+# We specify reasonable options for hyperparameters that will
+# be used to check for the best XGBoost model
+
+grid_tune <- expand.grid(nrounds = c(100, 400, 600),
+                         max_depth = c(4, 6, 8, 10),
+                         eta = c(0.1, 0.3, 0.5),
+                         gamma = c(0, 1, 2),
+                         colsample_bytree = c(1, 0.7, 0.5),
+                         min_child_weight = c(1, 2, 3), 
+                         subsample = c(0.5, 0.75, 1)
+                         )
+
+# We set a three-fold cross validation (due to the computational
+# resources that grid_tune is already taking)
+
+train_control <- trainControl(method = "cv",
+                              number= 3,
+                              verboseIter = FALSE,
+                              allowParallel = TRUE
+                              )
+```
+
+```{r message=FALSE, warning=FALSE}
+# We fit the XGBoost model with the presence of liver disease
+# being the y variable and all other variables as the x variables
+
+xgb_model <- train(x = xgb_train[, -1],
+                   y = xgb_train$Dataset,
+                   trControl = train_control,
+                   tuneGrid = grid_tune,
+                   method= "xgbTree",
+                   verbose = FALSE,
+                   verbosity = 0
+                   )
+
+xgb_model$bestTune
+
+
+```
+As can be seen from the results, the best performing XGBoost model has parameters nrounds = 100, max_depth = 4, eta = 0.5, gamma = 2, colsample_bytree = 1, min_child_weight = 1 and subsample = 0.5. This best performing model will be the final XGBoost model. 
+
+### XGBoost model evaluation
+
+Now, we move on to evaluating the performance of the final XGBoost model using its confusion matrix and ROC curve.
+
+```{r}
+
+xgb_test <- test
+xgb_test$Gender[xgb_test$Gender == "Female"] <- 1
+xgb_test$Gender[xgb_test$Gender == "Male"] <- 0
+xgb_test$Gender <- as.numeric(xgb_test$Gender)
+
+xgb_pred <- predict(xgb_model, xgb_test)
+
+# Confusion matrix for the final XGBoost model
+xgb_conmatrix <- confusionMatrix(data = xgb_pred, 
+                                 reference = xgb_test$Dataset,
+                                 positive = "1"
+                                 )
+
+xgb_conmatrix 
+
+# ROC-AUC Curve
+
+xgb_prob <- predict(xgb_model, xgb_test, type = "prob")
+log_odds_xgb_prob <- log(xgb_prob[, 2]/xgb_prob[ , 1])
+
+xgb_ROCPred <- prediction(log_odds_xgb_prob, xgb_test$Dataset) 
+xgb_ROCPer <- performance(xgb_ROCPred, measure = "tpr", 
+                      x.measure = "fpr")
+
+xgb_auc <- performance(xgb_ROCPred, measure = "auc")
+xgb_auc <- xgb_auc@y.values[[1]]
+xgb_auc
+
+# Plotting curve
+plot(xgb_ROCPer, colorize = TRUE, 
+     print.cutoffs.at = seq(0.1, by = 0.1), 
+     main = "ROC Curve for XGB Model"
+     )
+
+abline(a = 0, b = 1)
+
+xgb_auc <- round(xgb_auc, 4)
+legend(.6, .4, xgb_auc, title = "AUC", cex = 1)
+
+```
+
+Observe that for the final model: its accuracy is 0.6784, its sensitivity is 0.7750, and its AUC is 0.7113. 
+
+With all of these results, we will now move on to the results section which compares and contrasts the final logistic regression model and the final XGBoost model. 
+
+# Results
+
+To facilitate the discussion of the results of both models, we will refer to the past confusion matrices and ROC curves of both models.
+
+Let us focus on the ROC curve for each model first:
+
+```{r}
+# We compare the ROC-AUC Curve for each model
+par(mfrow = c(1, 2))
+
+# Logistic regression
+
+plot(ROCPer, colorize = TRUE, 
+     print.cutoffs.at = seq(0.1, by = 0.1), 
+     main = "ROCC for logistic regression"
+     )
+
+abline(a = 0, b = 1)
+
+auc <- round(auc, 4)
+legend(.22, .2, auc, title = "AUC", cex = 1)
+
+# XGB Model
+
+plot(xgb_ROCPer, colorize = TRUE, 
+     print.cutoffs.at = seq(0.1, by = 0.1), 
+     main = "ROCC for XGB Model"
+     )
+
+abline(a = 0, b = 1)
+
+xgb_auc <- round(xgb_auc, 4)
+legend(.22, .2, xgb_auc, title = "AUC", cex = 1)
+
+```
+
+As we can see from the plots, the final logistic regression model actually has a slightly higher area under the curve (AUC) value than the final XGBoost model. This implies that the logistic regression model actually performs better than the XGBoost model, since the former is able to attain a higher true positive rate or sensitivity without having to increase the false positive rate as much as the latter.
+
+Now, we move on to the confusion matrix for each model.
+
+```{r}
+# Logistic Regression
+logreg_conmatrix
+
+# XGB Model
+xgb_conmatrix
+
+```
+
+The final logistic regression model has an accuracy of 0.7076 and a sensitivity of 0.85, while the final XGBoost model has an accuracy of 0.6784 and a sensitivity of 0.7750.
+
+It is important to note that tweaking the threshold as was done earlier could lead to a lack of informedness which is equal to specificity + sensitivity - 1. If the informedness score is < 0 for a model, then it means that the use of that model represents a perverse use of information and that it is very unlikely for a person to make an informed decision between two classes.
+
+Fortunately, for both the logistic regression model and the XGBoost model, their informedness scores are greater than 0. More specifically, the informedness score for logistic regression is (0.8500 + 0.3725 - 1) = 0.2225, while the informedness score of the XGBoost model is (0.7500 + 0.4510 - 1) = 0.2010.
+
+From what can be gleaned from the results, it is clear that that the logistic regression model does a bit better than the XGBoost model when it comes to the accuracies, sensitivities, AUCs, and informedness scores of the two models even with parameter tuning on the XGBoost models. 
+
+Therefore, not only is the final logistic regression model developed in this study able to accurately predict the onset of liver disease 85% of the time (if the patient actually has a liver disease) but said model is also preferable to the final XGBoost model in this study when it comes to detecting whether a patient has liver disease or not.
+
+However, it must be noted that, on one hand, the logistic regression model needed more refinement than the XGBoost model in that backward elimination, multicollinearity checks, and outlier detection and removal had to be applied. On the other hand, the XGBoost model just had to be tuned and the same outlier detection and removal that was applied to logistic regression, was also applied to the XGBoost model.
+
+# Conclusion
+
+To conclude, we ran two different types of models: Logistic Regression and XGBoost, in order to develop a model or models which would accurately predict the onset of liver disease in patients. While both types of models performed satisfactorily, after some modifications, the final logistic regession model with a threshold of 0.0005 was chosen to be the best model overall due to having the highest accuracy, sensitivity, and AUC.
+
+While it was possible to produce models which could accurately predict liver disease, if a patient truly had liver disease, it was not possible with the current data and variables to make a model with either logistic regression or XGBoost that would be able to elicit both high sensitivity and specificity. 
+
+However, this was not a huge obstacle since, for liver disease patients, we want to maximize the probability of predicting a patient who has liver disease if they actually have liver disease, for the sake of early treatment and prevention of further harm to liver disease patients. 
+
+The potential impact of this chosen best model, the final logistic regression model, is that such a model could be used by hospitals who need to know how likely it is that a patient has liver disease without having to resort to expensive and invasive surgery. 
+
+The limitations of this model is that, again, it does not have a very high specificity and thus, it does not predict the onset of liver disease very accurately if a patient is not suffering from liver disease. Furthermore, there are only a few hundred observations and only a handful of variables. Both of these facts limit how much can be used to accurately predict the presence of liver disease in patients. 
+
+For further work, it would be prudent to collect more data from different countries, and to also include more variables that could possibly help shed light when it comes to the nature of liver disease onset. 
+
+
+Resources: 
+
+https://www.geeksforgeeks.org/logistic-regression-in-r-programming/
+https://www.youtube.com/watch?v=qjeUhuvkbHY&t=723s
